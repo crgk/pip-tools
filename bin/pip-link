@@ -1,0 +1,136 @@
+#!/usr/bin/env python
+from __future__ import absolute_import
+import os.path
+import glob
+import argparse
+import logging
+import sys
+import tempfile
+from itertools import dropwhile, takewhile, chain
+from functools import partial
+from pkg_resources import resource_filename
+from subprocess import check_call as _check_call
+
+try:
+    from subprocess import check_output as _check_output
+except ImportError:
+    import subprocess
+
+    def _check_output(*args, **kwargs):
+        process = subprocess.Popen(stdout=subprocess.PIPE, *args, **kwargs)
+        output, _ = process.communicate()
+        retcode = process.poll()
+        if retcode:
+            error = subprocess.CalledProcessError(retcode, args[0])
+            error.output = output
+            raise error
+        return output
+
+check_call = partial(_check_call, shell=True)
+check_output = partial(_check_output, shell=True)
+
+# Constants
+DEFAULT_REQUIREMENTS_FILE = u'requirements.txt'
+GLOB_PATTERNS = (u'*requirements.txt', u'requirements[_-]*.txt', u'requirements/*.txt')
+PIP_IGNORE_FILE = u'.pipignore'
+SPLIT_PATTERN = u'## The following requirements were added by pip --freeze:'
+
+
+class StdOutFilter(logging.Filter):
+    def filter(self, record):
+        return record.levelno in [logging.DEBUG, logging.INFO]
+
+
+def setup_logging(verbose):
+    if verbose:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
+
+    format = '%(message)s'
+
+    logger = logging.getLogger(u'pip-dump')
+
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.addFilter(StdOutFilter())
+    stdout_handler.setFormatter(logging.Formatter(format))
+    stdout_handler.setLevel(logging.DEBUG)
+
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setFormatter(logging.Formatter(format))
+    stderr_handler.setLevel(logging.WARNING)
+
+    logger.setLevel(level)
+    logger.addHandler(stderr_handler)
+    logger.addHandler(stdout_handler)
+    return logger
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='Creates symlinks to installed requirements in the ./lib directory.'
+    )
+    parser.add_argument(
+        '--verbose', '-v', action='store_true', default=False, help='Show more output'
+    )
+    parser.add_argument(
+        '--no-sort', action='store_false', default=True, help="Don't sort package names (default is to sort)", dest="should_sort"
+    )
+    parser.add_argument(
+        '--lib_dir', default='./lib', dest='lib_dir', help='Destination directory for linked requirements'
+    )
+    parser.add_argument(
+        '--local', '-l', action='store_true', default=False,
+        help='If in a virtualenv that has global access, do not output '
+             'globally-installed packages'
+    )
+    return parser.parse_args()
+
+
+def link_packages(installed_pkgs, lib_dir='./lib'):
+    if not files:
+        raise ValueError(u'Expected a list of at least one file name.')
+
+    lib_path = os.path.abspath(lib_dir)
+
+    # TODO does not recurse to non-existent path
+    # TODO does not make sure lib_path is a subdir
+    if not os.path.exists(lib_path):
+        check_call(u'mkdir {0}'.format(lib_path))
+
+    for pkg in installed_pkgs:
+        pkg_file = resource_filename(pkg, '')
+        check_call(u'ln -s {0} {1}'.format(' '.join(existing_files), lib_dir))
+
+def get_installed_pkgs(local=False):
+    logger = logging.getLogger(u'pip-review')
+    command = 'pip freeze'
+    if local:
+        command += ' --local'
+
+    output = check_output(command).decode('utf-8')
+
+    for line in output.split('\n'):
+        if not line or line.startswith('##'):
+            continue
+
+        if line.startswith('-e'):
+            name = line.split('#egg=', 1)[1]
+            if name.endswith('-dev'):
+                name = name[:-4]
+            yield name, 'dev', 'dev', True
+        else:
+            name, version = line.split('==')
+            yield name, parse_version(version), version, False
+
+
+def main():
+    args = parse_args()
+    logger = setup_logging(args.verbose)
+
+    installed_pkgs = get_installed_pkgs(args.local)
+    link_packages(installed_pkgs, lib_dir=args.lib_dir)
+
+
+if __name__ == '__main__':
+    main()
